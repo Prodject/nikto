@@ -111,3 +111,8 @@
 "x-varnish"
 "x-webkit-csp"
 "x-xss-protection"
+"timing-allow-origin"
+"cf-cache-status"
+"cf-ray"
+"x-cdn"
+"link"

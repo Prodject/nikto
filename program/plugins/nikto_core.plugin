@@ -1,4 +1,5 @@
 #VERSION,2.1.5
+
 ###############################################################################
 #  Copyright (C) 2006 Chris Sullo
 #
@@ -49,6 +50,22 @@ sub change_variables {
     }
 
     return @subtests;
+}
+
+sub unslash {
+    my $line = $_[0] || return;    # $line is the slash-escaped variable
+    my @line = split(/\\\\/, $line);
+    foreach (@line) {
+        $_ =~ s/\\a/\a/g;
+        $_ =~ s/\\b/\b/g;
+        $_ =~ s/\\e/\e/g;
+        $_ =~ s/\\f/\f/g;
+        $_ =~ s/\\n/\n/g;
+        $_ =~ s/\\r/\r/g;
+        $_ =~ s/\\t/\t/g;
+        $_ =~ s/\\x([[:xdigit:]]2)/chr(hex($1))/ge;
+    }
+    return join("\\", @line);
 }
 
 ###############################################################################
@@ -111,7 +128,7 @@ sub nprint {
     # don't print debug & verbose to output file...
     if ($mode ne '') {
         if ($mode eq "d" && $OUTPUT{'debug'}) {
-            print "D:" . localtime() . " $line\n";
+            print STDERR "D:" . localtime() . " $line\n";
         }
         if ($mode eq "v" && $OUTPUT{'verbose'}) {
             print "V:" . localtime() . " $line\n";
@@ -252,7 +269,7 @@ sub map_codes {
         $FoF{'okay'}{'match'} = LW2::md4($cooked);
     }
 
-    # these are some used in mutate that may not be in the db_tests
+    # these are some used that may not be in the db_tests
     if (defined $CLI{'mutate'}) {
         $db_extensions{'bak'}  = 1;
         $db_extensions{'data'} = 1;
@@ -260,6 +277,14 @@ sub map_codes {
         $db_extensions{'dbf'}  = 1;
         $db_extensions{'lst'}  = 1;
         $db_extensions{'htx'}  = 1;
+        $db_extensions{'htm'}  = 1;
+        $db_extensions{'html'}  = 1;
+        $db_extensions{'ini'}  = 1;
+        $db_extensions{'lst'}  = 1;
+        $db_extensions{'txt'}  = 1;
+        $db_extensions{'xml'}  = 1;
+        $db_extensions{'php'}  = 1;
+        $db_extensions{'php3'}  = 1;
     }
 
     foreach my $ext (keys %db_extensions) {
@@ -446,6 +471,14 @@ sub dump_target_info {
                 }
             }
         }
+
+	if (defined $mark->{'messages'}) {
+		my @msgs = @{ $mark->{'messages'} };
+		foreach my $m (@msgs) {
+        		nprint("+ Message:            $m");
+		}
+	}
+
         my $time = date_disp($mark->{start_time});
         nprint("+ Start Time:         $time (GMT$VARIABLES{'GMTOFFSET'})");
         nprint($VARIABLES{'DIV'});
@@ -538,7 +571,7 @@ sub general_config {
                ) or usage();
 
     # both -host and -url
-    if (($CLI{'host'} ne '') && ($CLI{'url'} ne '')) { 
+    if (($CLI{'host'} ne '') && ($CLI{'url'} ne '')) {
         nprint("+ ERROR: Cannot use -url and -host at the same time");
         exit;
 	}
@@ -1008,8 +1041,9 @@ sub readkey {
 
 ###############################################################################
 sub resolve {
-    my $ident = $_[0] || return;
-    my ($name, $ip) = "";
+    my $ident = $_[0] or return;
+    my ($ip, $name, $ipcache) = "";
+    my @addresses;
 
     if (($CONFIGFILE{'PROXYHOST'} ne '') && $CLI{'useproxy'}) {
         return $ident, $ident, $ident;
@@ -1022,21 +1056,28 @@ sub resolve {
             exit;
         }
 
-        $ip = gethostbyname($ident);
-        if ($ip eq "") {
-            nprint("+ ERROR: Cannot resolve hostname '$ident'\n");
-            return;
-        }
+    if ($hent = gethostbyname($ident)) {
+         # my $name      = $hent->name;  ## Future--report multiple names
+         my $addr_ref  = $hent->addr_list;
+         @addresses = map { inet_ntoa($_) } @$addr_ref;
+    }
 
-        # inet_ntoa will throw errors if something is wrong
-        $ip = inet_ntoa($ip);
-        if ($ip !~ /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/) {
-            nprint("+ ERROR: Invalid IP: $ip\n\n");
-            exit;
-        }
+    $ip = $addresses[0];
+    if ($addresses[1] != "") {
+	$ipcache = "Multiple IP addresses found: $ip, ";
+	for (my $i=1; $i<=$#addresses; $i++) {
+		$ipcache .= "$addresses[$i], ";
+	}
+        $ipcache =~ s/, $//;
+    }
+
+   if ($ip !~ /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/) {
+       nprint("+ ERROR: Invalid IP: $ip\n\n");
+       exit;
+   }
        $name = $ident;
      }
-    else    # ident is IP
+   else    # ident is IP
     {
         if ($ident !~ /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/) {
             nprint("+ ERROR: Invalid IP: $ident\n\n");
@@ -1047,7 +1088,7 @@ sub resolve {
     }
 
     my $displayname = ($name) ? $name : $ip;
-    return $name, $ip, $displayname;
+    return $name, $ip, $displayname, $ipcache;
 }
 
 ###############################################################################
@@ -1109,7 +1150,7 @@ sub set_targets {
         # is it a URL?
         if ($host =~ /^https?:\/\//) {
 
-            if ($CLI{'ports'} ne '') { 
+            if ($CLI{'ports'} ne '') {
 		nprint("- ERROR: The -port option cannot be used with a full URI");
 		exit;
 		}
@@ -1370,7 +1411,7 @@ sub check_dbs {
                 $line =~ s/^\s+//;
                 if ($line =~ /^\#|^$/) { next; }
                 my @L = parse_csv($line);
-                if (   ($L[4] !~ /(GET|POST|TRACE|TRACK|OPTIONS|SEARCH|INDEX)/i)
+                if (($L[4] !~ /(GET|POST|TRACE|TRACK|OPTIONS|SEARCH|INDEX)/i)
                     && ($L[0] ne '006433')) {
                     nprint("\t+ ERROR: Possibly invalid method: $L[4] on ($line)");
                 }
@@ -1401,7 +1442,7 @@ sub check_dbs {
                 else {
                     $ALL_IDS{$L[0]}=1;
                 }
-                if ($L[2] =~ /[^a-e0-9]/) {
+                if ($L[2] eq "" || $L[2] =~ /[^a-f0-9]/) {
                     nprint("\t+ ERROR: Invalid Tuning Type: $line");
                 }
                 if ($L[3] =~ '^(/@|//)' && $L[0] !~ /(000396|000447|000543|000544|000545|000928|000929|001208|001373|001497|002761|002762|003029|007152)/i) {
@@ -1645,10 +1686,10 @@ sub port_check {
 
             if ($res) {
 
-      # this will fix for some Apaches that are smart enough to answer non ssl reqs on an ssl server
+      # this will fix for some Apaches that are annoying enough to answer non TLS reqs on an TLS server
                 if (defined $content
                     && ( $content =~ /plain HTTP to an SSL/ ||
-					     $content =~ /The plain HTTP request was sent to HTTPS port/ )) {
+					     $content =~ /plain HTTP request was sent to HTTPS/ )) {
                     dump_var("Result Hash", \%result);
                     next;
                 }
@@ -2469,9 +2510,7 @@ sub nfetch {
                 && ($mark->{'banner'} ne $result{'server'})
 		&& ($result{'server'} ne 'Microsoft-HTTPAPI/2.0')
 		) {
-                nprint(
-                    "+ Server banner has changed from '$mark->{banner}' to '$result{server}' which may suggest a WAF, load balancer or proxy is in place"
-                    );
+		add_vulnerability($mark, "Server banner changed from '$mark->{banner}' to '$result{server}'", 999962, 0, $method, $uri, $request, $response);
                 $mark->{'bannerchanged'} = 1;
             }
         }
@@ -2616,7 +2655,7 @@ sub max_test_id {
 sub get_ips {
     my $string = $_[0] || return;
     my @ips;
-    while ($string =~ /(?:\b|[^0-9])([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\b|[^0-9])/g) {
+    while ($string =~ /(?:\b|[^0-9v])([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})(?:\b|[^0-9])/g) {
         push(@ips, $1);
     }
     return @ips;
@@ -2754,7 +2793,7 @@ sub send_updates {
             "\n
       *********************************************************************
       Portions of the server's headers ($updated_version) are not in
-      the Nikto database or are newer than the known string. Would you like
+      the Nikto " . $VARIABLES{'version'} . " database or are newer than the known string. Would you like
       to submit this information (*no server specific data*) to CIRT.net
       for a Nikto update (or you may email to sullo\@cirt.net) (y/n)? ", ""
         );
@@ -2796,13 +2835,13 @@ sub send_updates {
     }
 
     if ($code != 200) {
-	nprint("+ ERROR $code: Update failed, please notify sullo\@cirt.net of this code.");
+	nprint("+ ERROR: $code -> " . $response->{'location'} ."\n+ ERROR: Update failed, please notify sullo\@cirt.net of the previous line.");
 	}
     elsif ($content !~ /SUCCESS/) {
-        nprint("+ ERROR $code: Unable to send update info to CIRT.net. Here was the request result content:\n$content\n");
+        nprint("+ ERROR: Unable to send update info to cirt.net. Here was the request result : Code: $code\n$content\n");
     }
     else {
-        nprint("- Sent updated info to CIRT.net -- Thank you!");
+        nprint("- Sent updated info to cirt.net -- Thank you!");
     }
 
     return;
@@ -3023,7 +3062,7 @@ sub add_vulnerability {
                     nikto_id => $nikto_id,
                     osvdb    => $osvdb,
                     method   => $method,
-                    uri      => $response->{whisker}->{uri_requested},
+                    uri      => $response->{whisker}->{uri_requested} || '/',
                     result   => $result,
                     request  => $request,
                     response => $response,
